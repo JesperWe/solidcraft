@@ -922,6 +922,20 @@ pub fn check(h: &mut Harness, e: &Value) -> Result<(), String> {
                     return Err(format!("{k}: got {}, want {v}", si[key]));
                 }
             }
+            "autosaved" => {
+                // Check only this harness's recovery folder, and the exact current snapshot.
+                // A crash test must not assume a background write finishes in a few UI frames.
+                let current = h.app.autosave.as_ref().and_then(|a| a.active.as_ref()).is_some_and(|a| {
+                    solidcraft_engine::recovery::load(&h.dir.join("recovery"), &a.id).is_ok_and(|(saved, _)| {
+                        let mut expected = (*h.app.session.doc).clone();
+                        expected.visibility = h.app.session.visibility.clone();
+                        saved == expected
+                    })
+                });
+                if v.as_bool() != Some(current) {
+                    return Err(format!("autosaved: got {current}, want {v}"));
+                }
+            }
             "file" => {
                 // A file the scenario saved: it exists and is not empty.
                 let p = h.dir.join(v.as_str().unwrap_or_default());

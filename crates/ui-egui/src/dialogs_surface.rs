@@ -490,11 +490,11 @@ pub fn commands(app: &SolveApp, k: &Surf, inputs: &[SelInput], extra: &Map<Strin
         Surf::Revolve { angle, symmetric, axis } => {
             need(0, "profiles or curves to revolve")?;
             let mut p = sheet_picks(app, items(inputs, 0))?;
-            p["axis"] = match items(inputs, 1).first() {
-                Some(Sel::Axis { name }) => json!(name),
-                Some(Sel::SketchCurve { id, .. }) => json!(id),
-                _ => axis.clone().ok_or("select an axis")?,
-            };
+            p["axis"] = items(inputs, 1)
+                .first()
+                .and_then(|selected| crate::dialogs::revolve_axis_param(app, selected, p["sketch"].as_u64()))
+                .or_else(|| axis.clone())
+                .ok_or("select an axis")?;
             p["angle"] = json!(angle);
             if *symmetric {
                 p["symmetric"] = json!(true);
@@ -810,6 +810,7 @@ pub fn for_feature(app: &SolveApp, kind: &FeatureKind, frame: &Mat) -> Option<(K
                 AxisRef::World { axis } => (Some(Sel::Axis { name: axis.to_ascii_uppercase() }), None),
                 AxisRef::SketchAxis { axis } => (Some(Sel::Axis { name: axis.to_ascii_lowercase() }), None),
                 AxisRef::SketchLine { curve } => (Some(crate::selection::curve_pick(curve, sketch.0, s.active_sketch)), None),
+                AxisRef::SketchCurve { sketch, curve } => (Some(crate::selection::curve_pick(curve, sketch.0, s.active_sketch)), None),
                 AxisRef::Construction { name } => (Some(Sel::Axis { name: name.to_string() }), None),
                 AxisRef::Line { origin, dir } => (
                     None,

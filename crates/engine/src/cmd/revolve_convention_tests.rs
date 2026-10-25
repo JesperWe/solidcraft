@@ -360,3 +360,99 @@ fn construction_axis_revolve_rejects_invalid_axes_atomically() {
         assert!(s.model.state().bodies.is_empty());
     }
 }
+
+fn cross_sketch_axis_fixture(s: &mut Session, plane: Value) -> (u64, u64) {
+    run(s, "sketch.create", json!({"name":"AxisSketch","plane":plane}));
+    run(s, "sketch.line", json!({"points":[[0,-20],[0,20]],"ids":["l1"]}));
+    run(s, "sketch.infinite", json!({"curves":["l1"],"value":true}));
+    run(s, "sketch.finish", json!({}));
+    let source = s.doc.find_feature("AxisSketch").unwrap().id;
+    run(s, "component.activate", json!({"component":0}));
+    run(s, "sketch.create", json!({"name":"ProfileSketch","plane":"XY"}));
+    // A different `l1` crossing the rectangle makes loss of the source sketch observable.
+    run(s, "sketch.line", json!({"points":[[15,-10],[15,10]],"ids":["l1"],"construction":true}));
+    run(s, "sketch.rectangle.two_point", json!({"p0":[10,-5],"p1":[20,5]}));
+    run(s, "sketch.finish", json!({}));
+    (source, s.doc.find_feature("ProfileSketch").unwrap().id)
+}
+
+fn assert_cross_sketch_ring(s: &Session, command: &str, shifted: bool) {
+    assert!(s.model.results.iter().all(|r| r.error.is_none()));
+    let st = s.model.state();
+    assert_eq!(st.bodies.len(), 1);
+    let body = &st.bodies[0];
+    let measured = solidcraft_kernel::measure(&body.body).unwrap();
+    let factor = if shifted { 3200.0 } else { 3000.0 };
+    let (actual, expected, tolerance) =
+        if command == "solid.revolve" { (measured.volume, factor * PI, 0.1) } else { (measured.area, factor * 0.4 * PI, 0.1) };
+    assert!((actual - expected).abs() < tolerance, "{command}: {actual} != {expected}");
+    let bounds = body.mesh().bounds();
+    assert!((bounds.min.x - if shifted { -22.0 } else { -20.0 }).abs() < 1e-6, "{bounds:?}");
+    assert!((bounds.max.x - 20.0).abs() < 1e-6, "{bounds:?}");
+    // Display meshes approximate the circular extrema within their chord tolerance.
+    assert!((bounds.max.z - if shifted { 21.0 } else { 20.0 }).abs() < 0.02, "{bounds:?}");
+}
+
+#[test]
+fn cross_sketch_revolve_axis_follows_edits_and_round_trips() {
+    for command in ["solid.revolve", "surface.revolve"] {
+        let mut s = Session::default();
+        let (source, profile) = cross_sketch_axis_fixture(&mut s, json!("XY"));
+        run(&mut s, command, json!({"sketch":profile,"axis":{"sketch":"AxisSketch","curve":"l1"},"name":"Turn"}));
+        assert_cross_sketch_ring(&s, command, false);
+        let turn = s.doc.find_feature("Turn").unwrap();
+        let turn_id = turn.id;
+        assert_eq!(turn.kind.input_sketches(), vec![profile, source]);
+        let saved = serde_json::to_value(&turn.kind).unwrap();
+        assert_eq!(saved["axis"], json!({"type":"sketch_curve","sketch":source,"curve":"l1"}));
+        let mut copied = turn.kind.clone();
+        copied.remap_refs(&std::collections::BTreeMap::from([(source, source + 100)]), &Default::default());
+        assert_eq!(serde_json::to_value(copied).unwrap()["axis"]["sketch"], source + 100);
+        assert_cross_sketch_ring(&Session::new(Document::from_json(&s.doc.to_json()).unwrap()), command, false);
+        run(&mut s, "sketch.edit", json!({"sketch":source}));
+        run(&mut s, "sketch.move", json!({"entities":["l1"],"translate":[-1,0]}));
+        run(&mut s, "sketch.finish", json!({}));
+        assert_cross_sketch_ring(&s, command, true);
+        assert_cross_sketch_ring(&Session::new(Document::from_json(&s.doc.to_json()).unwrap()), command, true);
+        let deleted = run(&mut s, "timeline.delete", json!({"feature":source}));
+        assert!(deleted["deleted"].as_array().unwrap().contains(&json!(turn_id)));
+        assert!(s.doc.find_feature("Turn").is_none(), "deleting the axis sketch deletes its dependent revolve");
+    }
+}
+
+#[test]
+fn cross_sketch_revolve_axis_reads_its_component_placement() {
+    for command in ["solid.revolve", "surface.revolve"] {
+        let mut s = Session::default();
+        let owner = run(&mut s, "component.create", json!({"name":"AxisOwner","grounded":false}));
+        let (source, profile) = cross_sketch_axis_fixture(&mut s, json!("XY"));
+        run(&mut s, command, json!({"sketch":profile,"axis":{"sketch":source,"curve":"l1"},"name":"Turn"}));
+        assert_cross_sketch_ring(&s, command, false);
+        run(&mut s, "occurrence.move", json!({"occurrence":owner["occurrence"],"translate":[-1,0,0]}));
+        assert_cross_sketch_ring(&s, command, true);
+        assert_cross_sketch_ring(&Session::new(Document::from_json(&s.doc.to_json()).unwrap()), command, true);
+    }
+}
+
+#[test]
+fn cross_sketch_revolve_axis_rejects_invalid_sources_atomically() {
+    for command in ["solid.revolve", "surface.revolve"] {
+        for (plane, axis) in [
+            (json!("XY"), json!({"sketch":"AxisSketch","curve":"missing"})),
+            (json!("XY"), json!({"sketch":"missing","curve":"l1"})),
+            (json!("XY"), json!({"sketch":"AxisSketch"})),
+            (json!("XY"), json!({"curve":"l1"})),
+            (json!("XY"), json!({"sketch":[1],"curve":"l1"})),
+            (json!("XY"), json!({"sketch":"AxisSketch","curve":4})),
+            (json!({"origin":[0,0,1],"x_dir":[1,0,0],"y_dir":[0,1,0]}), json!({"sketch":"AxisSketch","curve":"l1"})),
+            (json!("YZ"), json!({"sketch":"AxisSketch","curve":"l1"})),
+        ] {
+            let mut s = Session::default();
+            let (_, profile) = cross_sketch_axis_fixture(&mut s, plane);
+            let before = s.doc.to_json();
+            assert!(s.execute(command, &json!({"sketch":profile,"axis":axis})).is_err(), "{command}: {axis}");
+            assert_eq!(s.doc.to_json(), before);
+            assert!(s.model.state().bodies.is_empty());
+        }
+    }
+}

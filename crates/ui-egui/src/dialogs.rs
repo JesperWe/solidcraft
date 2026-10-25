@@ -3500,12 +3500,12 @@ fn dialog_commands(app: &SolveApp, d: &Dialog) -> Result<Vec<(String, Value)>, S
         }
         Kind::Revolve { angle, operation, axis: stored_axis } => {
             need(0, "profiles")?;
-            let axis = match sels(d, 1).first() {
-                Some(Sel::Axis { name }) => json!(name),
-                Some(Sel::SketchCurve { id, .. }) => json!(id),
-                _ => stored_axis.clone().ok_or("select an axis")?,
-            };
             let (sketch, idx) = profiles();
+            let axis = sels(d, 1)
+                .first()
+                .and_then(|selected| revolve_axis_param(app, selected, sketch.as_u64()))
+                .or_else(|| stored_axis.clone())
+                .ok_or("select an axis")?;
             let mut p = json!({"axis": axis, "angle": angle, "operation": OPS.get(*operation).copied().unwrap_or("new")});
             // A planar body face revolves like a profile (#2747); profiles win when both are picked.
             let face = sels(d, 0).iter().find_map(|x| match x {
@@ -4226,6 +4226,19 @@ pub(crate) fn curves_sketch(app: &SolveApp, ids: &[String], not: Option<u64>) ->
     st.sketches.iter().rev().map(|ss| ss.feature).find(|sid| Some(*sid) != not && has(*sid))
 }
 
+/// Keep a picked axis line's sketch through command generation. Profile-local line ids keep
+/// their existing representation, including when an older feature is opened without changes.
+pub(crate) fn revolve_axis_param(app: &SolveApp, selected: &Sel, profile: Option<u64>) -> Option<Value> {
+    match selected {
+        Sel::Axis { name } => Some(json!(name)),
+        Sel::SketchCurve { id, sketch } => Some(match sketch.or(app.session.active_sketch) {
+            Some(source) if Some(source) != profile => json!({"sketch": source, "curve": id}),
+            _ => json!(id),
+        }),
+        _ => None,
+    }
+}
+
 /// An axis selection as a line: a point on it and its unit direction (origin axes, or a straight
 /// sketch line).
 pub fn axis_of(app: &SolveApp, sel: &Sel) -> Option<(Vec3, Vec3)> {
@@ -4680,6 +4693,7 @@ pub fn for_feature(app: &SolveApp, id: u64, marker: Option<usize>) -> Option<Dia
                 AxisRef::World { axis } => Some(Sel::Axis { name: axis.to_ascii_uppercase() }),
                 AxisRef::SketchAxis { axis } => Some(Sel::Axis { name: axis.to_ascii_lowercase() }),
                 AxisRef::SketchLine { curve } => Some(crate::selection::curve_pick(curve, sketch.0, s.active_sketch)),
+                AxisRef::SketchCurve { sketch, curve } => Some(crate::selection::curve_pick(curve, sketch.0, s.active_sketch)),
                 AxisRef::Construction { name } => Some(Sel::Axis { name: name.to_string() }),
                 _ => None,
             };

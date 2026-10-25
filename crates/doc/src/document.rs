@@ -365,6 +365,8 @@ impl ThinSide {
 pub enum AxisRef {
     /// A line of the profile's sketch.
     SketchLine { curve: String },
+    /// A line in an explicitly named sketch, evaluated in the consuming feature's frame.
+    SketchCurve { sketch: SketchId, curve: String },
     /// Sketch x or y axis through the sketch origin (`x` / `y`).
     SketchAxis { axis: String },
     /// World X / Y / Z axis through the origin.

@@ -54,6 +54,11 @@
   }
  },
  {
+  "until": {
+   "autosaved": true
+  }
+ },
+ {
   "restart": "crash"
  },
  {

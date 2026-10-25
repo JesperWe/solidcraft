@@ -29,7 +29,7 @@ pub static COMMANDS: &[CommandSpec] = &[
     CommandSpec::new("solid.revolve", "Revolve", revolve)
         .at("SOLID", "CREATE")
         .icon("revolve")
-        .params("axis: sketch line id | x | y (sketch axes) | X|Y|Z (world) | construction axis name (followed when edited) | {origin, dir}; angle?: expr (default 360 deg); angle2?: expr (Two Sides: the other side's angle); direction?: symmetric (angle split either side, independent of axis direction); convention?: sketch_normal|legacy_axis_start (default sketch_normal; legacy retains older angular starts); to?: [x,y,z] (To Object: turn until that face, vertex or point); sketch?, profiles? | face: [x,y,z] (a planar body face as the profile) and face_body?: name (whose face, where faces of several bodies meet), operation?, targets?, name?, body_name?"),
+        .params("axis: sketch line id | x | y (sketch axes) | X|Y|Z (world) | construction axis name (followed when edited) | {sketch, curve} (a line from another sketch) | {origin, dir}; angle?: expr (default 360 deg); angle2?: expr (Two Sides: the other side's angle); direction?: symmetric (angle split either side, independent of axis direction); convention?: sketch_normal|legacy_axis_start (default sketch_normal; legacy retains older angular starts); to?: [x,y,z] (To Object: turn until that face, vertex or point); sketch?, profiles? | face: [x,y,z] (a planar body face as the profile) and face_body?: name (whose face, where faces of several bodies meet), operation?, targets?, name?, body_name?"),
     CommandSpec::new("solid.sweep", "Sweep", sweep)
         .at("SOLID", "CREATE")
         .icon("sweep")
@@ -1047,10 +1047,19 @@ fn revolve(s: &mut Session, p: &Value) -> Result<Value> {
 }
 
 /// A revolve axis of `sketch` from its parameter: a sketch line id, the sketch's x or y axis, a
-/// world axis, a construction axis by name (followed when it is edited) or {origin, dir}. A line
-/// of the sketch wins over a construction axis of the same name.
+/// world axis, a construction axis by name (followed when it is edited), {sketch, curve} or
+/// {origin, dir}. A line of the sketch wins over a construction axis of the same name.
 pub(super) fn axis_param(s: &Session, sketch: u64, p: &Value, cmd: &str) -> Result<AxisRef> {
     if let Some(o) = p.get("axis").filter(|v| v.is_object()) {
+        if o.get("sketch").is_some() || o.get("curve").is_some() {
+            let source = sketch_id(s, o.get("sketch"), cmd, "axis.sketch")?;
+            let curve = str_(o, "curve").ok_or_else(|| bad(cmd, "axis needs `curve`, a line id in `sketch`"))?;
+            return Ok(if source == sketch {
+                AxisRef::SketchLine { curve: curve.into() }
+            } else {
+                AxisRef::SketchCurve { sketch: SketchId(source), curve: curve.into() }
+            });
+        }
         let origin = o.get("origin").and_then(vec3).unwrap_or(Vec3::ZERO);
         let dir = o.get("dir").and_then(vec3).ok_or_else(|| bad(cmd, "axis needs `dir`"))?;
         return Ok(AxisRef::Line { origin: Position(origin), dir: Dir(dir) });
@@ -1060,7 +1069,7 @@ pub(super) fn axis_param(s: &Session, sketch: u64, p: &Value, cmd: &str) -> Resu
         Some(a @ ("x" | "y")) => Ok(AxisRef::SketchAxis { axis: a.into() }),
         Some(name) if !is_sketch_line(s, sketch, name) && is_construction_axis(s, name) => Ok(AxisRef::Construction { name: name.into() }),
         Some(id) => Ok(AxisRef::SketchLine { curve: id.into() }),
-        None => Err(bad(cmd, "`axis` must be a sketch line id, x, y (sketch axes), X, Y, Z, a construction axis or {origin, dir}")),
+        None => Err(bad(cmd, "`axis` must be a sketch line id, x, y (sketch axes), X, Y, Z, a construction axis, {sketch, curve} or {origin, dir}")),
     }
 }
 

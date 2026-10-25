@@ -283,3 +283,53 @@ fn only_the_active_selection_field_looks_active() {
     assert_eq!(border(&h, "Profile"), filled, "filled inactive");
     assert_ne!(filled, t.control_border, "filled inactive differs from empty inactive");
 }
+
+/// #6548: `l1` belongs to both sketches; selecting the earlier sketch's infinite line must
+/// survive the viewport hit, command, preview and edit rather than use the profile's `l1`.
+#[test]
+fn cross_sketch_revolve_axis_survives_pick_preview_and_edit() {
+    use solidcraft_engine::Sel;
+    for command in ["solid.revolve", "surface.revolve"] {
+        let mut h = Harness::new();
+        h.app.run("sketch.create", json!({"plane":"XY","name":"AxisSketch"})).unwrap();
+        h.app.run("sketch.line", json!({"points":[[0,-20],[0,20]],"ids":["l1"]})).unwrap();
+        h.app.run("sketch.infinite", json!({"curves":["l1"],"value":true})).unwrap();
+        h.app.run("sketch.finish", json!({})).unwrap();
+        let source = h.app.session.doc.find_feature("AxisSketch").unwrap().id;
+        h.app.run("sketch.create", json!({"plane":"XY","name":"ProfileSketch"})).unwrap();
+        h.app.run("sketch.line", json!({"points":[[15,-10],[15,10]],"construction":true,"ids":["l1"]})).unwrap();
+        h.app.run("sketch.rectangle.two_point", json!({"p0":[10,-5],"p1":[20,5]})).unwrap();
+        h.app.run("sketch.finish", json!({})).unwrap();
+        let profile = h.app.session.doc.find_feature("ProfileSketch").unwrap().id;
+        h.app.start(command);
+        let d = h.app.dialog.as_mut().unwrap();
+        d.inputs[0].items = vec![Sel::Profile { sketch: profile, index: 0 }];
+        d.active = 1;
+        let hit = crate::viewport::Hit::SketchCurve { sketch: source, id: "l1".into(), straight: true };
+        let pick = d.candidate_on(&h.app.session, &hit, None).unwrap();
+        d.pick(&h.app.session, pick);
+        let commands = crate::dialogs::apply_commands(&h.app, h.app.dialog.as_ref().unwrap()).unwrap();
+        assert_eq!(commands[0].1["axis"], json!({"sketch":source,"curve":"l1"}));
+        let preview = h.app.session.preview(&commands).unwrap();
+        assert_eq!(preview.after.bodies.len(), 1);
+        let measured = solidcraft_engine::doc::kernel::measure(&preview.after.bodies[0].body).unwrap();
+        let (actual, expected, tolerance) = if command == "solid.revolve" {
+            (measured.volume, 3000.0 * std::f64::consts::PI, 0.03)
+        } else {
+            (measured.area, 1200.0 * std::f64::consts::PI, 0.1)
+        };
+        assert!((actual - expected).abs() < tolerance, "{command}: {actual} != {expected}");
+        h.frames(4);
+        h.step(&json!({"widget":"OK"})).unwrap();
+        assert!(h.app.dialog.is_none(), "{:?}", h.app.session.log);
+        let feature = h.app.session.doc.features.last().unwrap().id;
+        h.step(&json!({"call":"ui.editFeature","params":{"feature":feature}})).unwrap();
+        h.frames(4);
+        let d = h.app.dialog.as_ref().unwrap();
+        assert_eq!(d.inputs[1].items, vec![Sel::SketchCurve { id: "l1".into(), sketch: Some(source) }]);
+        let edited = crate::dialogs::apply_commands(&h.app, d).unwrap();
+        assert_eq!(edited[0].1["params"]["axis"], commands[0].1["axis"]);
+        h.step(&json!({"widget":"OK"})).unwrap();
+        assert!(h.app.dialog.is_none());
+    }
+}

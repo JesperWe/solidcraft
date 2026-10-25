@@ -1603,6 +1603,11 @@ fn placement_digest(doc: &Document, f: &Feature, st: Option<&ModelState>) -> u64
             reads.sketch(doc, sketch.0);
         }
     }
+    if let FeatureKind::Revolve { axis: AxisRef::SketchCurve { sketch, .. }, .. }
+    | FeatureKind::SurfaceRevolve { axis: AxisRef::SketchCurve { sketch, .. }, .. } = &f.kind
+    {
+        reads.sketch(doc, sketch.0);
+    }
     // A network through 3D sketch curves reads their points through the components the
     // feature and those sketches are placed in, as a sweep's wired path does.
     if let FeatureKind::SurfaceNetwork { u, v, .. } = &f.kind {
@@ -3903,9 +3908,9 @@ fn blend_body(
     Ok((Traced::step(nb.with_preserved_planar_sources(&mb.body)?, &[&from]), used, tapered))
 }
 
-/// The revolve axis in the sketch's 2D coordinates (a point on it, its direction). `construct`
-/// gives a construction axis, by name, in the sketch's 3D frame.
-pub(crate) fn revolve_axis(ss: &SolvedSketch, axis: &AxisRef, construct: &dyn Fn(&str) -> Result<(Vec3, Vec3)>) -> Result<(Vec2, Vec2)> {
+/// The revolve axis in the profile sketch's 2D coordinates. Named sketch lines and construction
+/// axes are resolved from the timeline so edits follow their source, through component frames.
+pub(crate) fn revolve_axis(ss: &SolvedSketch, axis: &AxisRef, st: &ModelState, doc: Option<&Document>, component: u64) -> Result<(Vec2, Vec2)> {
     let in_plane = |origin: Vec3, dir: Vec3| {
         let pl = &ss.plane;
         let d = dir.normalized().ok_or_else(|| DocError::Invalid("revolve axis has no direction".into()))?;
@@ -3914,16 +3919,30 @@ pub(crate) fn revolve_axis(ss: &SolvedSketch, axis: &AxisRef, construct: &dyn Fn
         }
         Ok((pl.to_local(origin), Vec2::new(d.dot(pl.x), d.dot(pl.y))))
     };
+    let line = |source: &SolvedSketch, curve: &str| {
+        let ci = source.sketch.curve_index(curve).ok_or_else(|| DocError::Unknown(format!("sketch line `{curve}` in {}", source.name)))?;
+        let Some(CurveKind::Line { a, b }) = source.sketch.curves.get(ci).map(|c| &c.kind) else {
+            return Err(DocError::Invalid(format!("`{curve}` is not a line")));
+        };
+        let point = |id| source.sketch.point(id).ok_or_else(|| DocError::Invalid(format!("sketch line `{curve}` has a missing endpoint")));
+        let (pa, pb) = (point(*a)?, point(*b)?);
+        Ok((pa, pb - pa))
+    };
     match axis {
-        AxisRef::SketchLine { curve } => {
-            let ci = ss.sketch.curve_index(curve).ok_or_else(|| DocError::Unknown(format!("sketch line `{curve}`")))?;
-            match ss.sketch.curves.get(ci).map(|c| &c.kind) {
-                Some(CurveKind::Line { a, b }) => {
-                    let (pa, pb) = (ss.sketch.point(*a).unwrap_or_default(), ss.sketch.point(*b).unwrap_or_default());
-                    Ok((pa, pb - pa))
+        AxisRef::SketchLine { curve } => line(ss, curve),
+        AxisRef::SketchCurve { sketch, curve } => {
+            let source =
+                st.sketch(sketch.0).ok_or_else(|| DocError::Unknown(format!("axis sketch {sketch} (it must come earlier in the timeline)")))?;
+            let mapped;
+            let source = match doc {
+                Some(doc) => {
+                    mapped = sketch_in_feature_frame(doc, source, component)?;
+                    &mapped
                 }
-                _ => Err(DocError::Invalid(format!("`{curve}` is not a line"))),
-            }
+                None => source,
+            };
+            let (origin, dir) = line(source, curve)?;
+            in_plane(source.plane.to_world(origin), source.plane.dir_to_world(dir))
         }
         AxisRef::SketchAxis { axis } => match axis.to_ascii_lowercase().as_str() {
             "x" => Ok((Vec2::ZERO, Vec2::X)),
@@ -3945,7 +3964,7 @@ pub(crate) fn revolve_axis(ss: &SolvedSketch, axis: &AxisRef, construct: &dyn Fn
         }
         AxisRef::Line { origin, dir } => in_plane(origin.0, dir.0),
         AxisRef::Construction { name } => {
-            let (origin, dir) = construct(name)?;
+            let (origin, dir) = construction_axis_in(doc, st, name, component)?;
             in_plane(origin, dir)
         }
     }
@@ -5112,7 +5131,7 @@ fn feature_tools_with_constructor(
                 f.component,
             )?;
             let regions = solidcraft_sketch::merge_regions(&select_profiles(&ss, profiles)?);
-            let (o, d) = revolve_axis(&ss, axis, &|name| construction_axis_in(Some(doc), st, name, f.component))?;
+            let (o, d) = revolve_axis(&ss, axis, st, Some(doc), f.component)?;
             // To Object is in this feature's component frame: the model as seen from there.
             let tst = if to.is_some() { state_in_frame(doc, st, f.component) } else { std::borrow::Cow::Borrowed(st) };
             // Where the tool meets its targets is measured where they are shown (#3383).
